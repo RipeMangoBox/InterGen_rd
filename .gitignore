@@ -6,3 +6,5 @@ venv
 evaluation_*
 cache
 eval_model
+
+data/

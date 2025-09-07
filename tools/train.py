@@ -151,7 +151,7 @@ if __name__ == '__main__':
                                                        every_n_epochs=train_cfg.TRAIN.SAVE_EPOCH)
     trainer = pl.Trainer(
         default_root_dir=litmodel.model_dir,
-        devices="auto", accelerator='gpu',
+        devices=[0], accelerator='gpu',
         max_epochs=train_cfg.TRAIN.EPOCH,
         strategy=DDPStrategy(find_unused_parameters=True),
         precision=32,

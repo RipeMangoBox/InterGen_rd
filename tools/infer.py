@@ -117,7 +117,7 @@ if __name__ == '__main__':
     litmodel = LitGenModel(model, infer_cfg).to(torch.device("cuda:0"))
 
 
-    with open(".\prompts.txt") as f:
+    with open("./prompts.txt") as f:
         texts = f.readlines()
     texts = [text.strip("\n") for text in texts]
 
