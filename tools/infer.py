@@ -13,6 +13,7 @@ from configs import get_config
 from utils.plot_script import *
 from utils.preprocess import *
 from utils import paramUtil
+import time
 
 class LitGenModel(L.LightningModule):
     def __init__(self, model, cfg):
@@ -50,22 +51,21 @@ class LitGenModel(L.LightningModule):
         plot_3d_motion(result_path, paramUtil.t2m_kinematic_chain, mp_joint, title=caption, fps=30)
 
 
-    def generate_one_sample(self, prompt, name):
+    def generate_one_sample(self, prompt, result_dir, name, window_size = 210):
         self.model.eval()
         batch = OrderedDict({})
 
         batch["motion_lens"] = torch.zeros(1,1).long().cuda()
         batch["prompt"] = prompt
 
-        window_size = 210
+        # window_size = 210
         motion_output = self.generate_loop(batch, window_size)
-        result_path = f"results/{name}.mp4"
-        if not os.path.exists("results"):
-            os.makedirs("results")
+        result_path = os.path.join(result_dir, f"{name}.mp4")
 
         self.plot_t2m([motion_output[0], motion_output[1]],
                       result_path,
                       batch["prompt"])
+
 
     def generate_loop(self, batch, window_size):
         prompt = batch["prompt"]
@@ -92,16 +92,47 @@ class LitGenModel(L.LightningModule):
         sequences[1] = np.concatenate(sequences[1], axis=0)
         return sequences
 
+def generate_samples_loop(model, model_cfg, infer_cfg, prompts_path, window_size = 210, result_dir = None, epoch = 0):
+    if model is None:
+        model = build_models(model_cfg)
+        if model_cfg.CHECKPOINT:
+            ckpt = torch.load(model_cfg.CHECKPOINT, map_location="cpu")
+            for k in list(ckpt["state_dict"].keys()):
+                if "model" in k:
+                    ckpt["state_dict"][k.replace("model.", "")] = ckpt["state_dict"].pop(k)
+            model.load_state_dict(ckpt["state_dict"], strict=False)
+            print("checkpoint state loaded!")
+    
+    # if not os.path.exists(model_cfg.CHECKPOINT):
+    #     os.makedirs(model_cfg.CHECKPOINT)
+
+    litmodel = LitGenModel(model, infer_cfg).to(torch.device("cuda:0"))
+    
+    with open(prompts_path) as f:
+        texts = f.readlines()
+    texts = [text.strip("\n") for text in texts]
+
+    if result_dir is None:
+        result_dir = f"results/generated/{model.cfg.CHECKPOINT.split('/')[-1].split('.')[0]}"
+        result_dir = os.path.join(result_dir, time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime()))
+    if not os.path.exists(result_dir):
+        os.makedirs(result_dir)
+
+    for text in texts[:3]:
+        name = text[:48] + "_" + str(epoch)
+        # for i in range(3):
+        #     litmodel.generate_one_sample(text, result_dir, name+"_"+str(i), window_size=window_size)
+        litmodel.generate_one_sample(text, result_dir, name)
+
 def build_models(cfg):
     if cfg.NAME == "InterGen":
         model = InterGen(cfg)
     return model
 
 
-
 if __name__ == '__main__':
     # torch.manual_seed(37)
-    model_cfg = get_config("configs/model.yaml")
+    model_cfg = get_config("configs/eval_model.yaml")
     infer_cfg = get_config("configs/infer.yaml")
 
     model = build_models(model_cfg)
@@ -121,8 +152,11 @@ if __name__ == '__main__':
         texts = f.readlines()
     texts = [text.strip("\n") for text in texts]
 
+    result_dir = "results/sample_after_train"
+    os.makedirs(result_dir, exist_ok=True)
+
     for text in texts:
         name = text[:48]
         for i in range(3):
-            litmodel.generate_one_sample(text, name+"_"+str(i))
+            litmodel.generate_one_sample(text, result_dir, name+"_"+str(i), window_size=30)
 

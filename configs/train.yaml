@@ -3,13 +3,16 @@ GENERAL:
   CHECKPOINT: ./checkpoints
   LOG_DIR: ./log
 
+# lr: 1e-4
+batch_size: 16
+num_dataloader_workers: 4
 TRAIN:
   LR: 1e-4
   WEIGHT_DECAY: 0.00002
-  BATCH_SIZE: 7
+  # BATCH_SIZE: 16
   EPOCH: 2000
   STEP: 1000000
-  LOG_STEPS: 10
+  LOG_STEPS: 200
   SAVE_STEPS: 20000
   SAVE_EPOCH: 100
   RESUME: #checkpoints/IG-S/8/model/epoch=99-step=17600.ckpt

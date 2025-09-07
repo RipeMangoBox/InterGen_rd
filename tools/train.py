@@ -9,10 +9,35 @@ from configs import get_config
 from os.path import join as pjoin
 from torch.utils.tensorboard import SummaryWriter
 from models import *
-
+from tools.infer import generate_samples_loop
+from datasets import InterHumanDataset
 os.environ['PL_TORCH_DISTRIBUTED_BACKEND'] = 'nccl'
 from lightning.pytorch.strategies import DDPStrategy
 torch.set_float32_matmul_precision('medium')
+
+import os
+from argparse import ArgumentParser, Namespace
+import yaml
+from lightning import Trainer
+
+def get_hparams():
+    parser = ArgumentParser()
+    parser.add_argument("--dataset_root", default='./data/motions_processed')
+    parser.add_argument("--hparams_file", default='./configs/train.yaml')
+    parser = Trainer.add_argparse_args(parser)
+    default_params = parser.parse_args()
+
+    conf_name = os.path.basename(default_params.hparams_file)
+    if default_params.hparams_file.endswith(".yaml"):
+        hparams_json = yaml.full_load(open(default_params.hparams_file))
+
+    params = vars(default_params)
+    params.update(hparams_json)
+    params.update(vars(default_params))
+
+    hparams = Namespace(**params)
+
+    return hparams, conf_name
 
 class LitTrainModel(pl.LightningModule):
     def __init__(self, model, cfg):
@@ -102,14 +127,25 @@ class LitTrainModel(pl.LightningModule):
                                inner_iter=batch_idx,
                                lr=self.trainer.optimizers[0].param_groups[0]['lr'])
 
-
-
     def on_train_epoch_end(self):
         # pass
         sch = self.lr_schedulers()
         if sch is not None:
             sch.step()
 
+    def validation_step(self, batch, batch_idx):
+        loss, loss_logs = self(batch)
+        self.log('val_loss', loss, prog_bar=True, sync_dist=True)
+
+        output = {"val_loss": loss}
+        return output
+
+    def validation_epoch_end(self, outputs):
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        self.log('VAL_LOSS', avg_loss, sync_dist=True)
+        
+        if self.current_epoch % 10 == 0:
+            self.synthesis_and_vis_one_sample()
 
     def save(self, file_name):
         state = {}
@@ -120,22 +156,52 @@ class LitTrainModel(pl.LightningModule):
         torch.save(state, file_name, _use_new_zipfile_serialization=False)
         return
 
+    def synthesis_and_vis_one_sample(self):
+        prompts_path = "prompts.txt"
+        result_dir = self.logger.log_dir
+        if not os.path.exists(result_dir):
+            os.makedirs(result_dir)
+
+        generate_samples_loop(self.model, self.cfg, self.cfg, prompts_path, result_dir=result_dir, epoch=self.current_epoch)
 
 def build_models(cfg):
     if cfg.NAME == "InterGen":
         model = InterGen(cfg)
     return model
 
+def data_loader(dataset_root, data_cfg, batch_size, num_workers=16, shuffle=True):
+
+    print("dataset_root: " + dataset_root)
+    dataset = InterHumanDataset(data_cfg)
+
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=shuffle,
+        drop_last=True,
+    )
+    
+def dataloaders(dataset_root, data_cfg, batch_size, num_workers):
+
+    train_dl = data_loader(dataset_root, data_cfg.interhuman_train, batch_size, num_workers, shuffle=True)    
+    val_dl = data_loader(dataset_root, data_cfg.interhuman_val, batch_size, num_workers, shuffle=False)
+    
+    return train_dl, val_dl
+
 
 if __name__ == '__main__':
     print(os.getcwd())
     model_cfg = get_config("configs/model.yaml")
     train_cfg = get_config("configs/train.yaml")
-    data_cfg = get_config("configs/datasets.yaml").interhuman
+    data_cfg = get_config("configs/datasets.yaml")
 
-    datamodule = DataModule(data_cfg, train_cfg.TRAIN.BATCH_SIZE, train_cfg.TRAIN.NUM_WORKERS)
+
+    # datamodule = DataModule(data_cfg, train_cfg.TRAIN.BATCH_SIZE, train_cfg.TRAIN.NUM_WORKERS)
+    hparams, conf_name = get_hparams()
+    train_dl, val_dl = dataloaders(hparams.dataset_root, data_cfg, hparams.batch_size, hparams.num_dataloader_workers)
     model = build_models(model_cfg)
-
 
     if train_cfg.TRAIN.RESUME:
         ckpt = torch.load(train_cfg.TRAIN.RESUME, map_location="cpu")
@@ -145,7 +211,6 @@ if __name__ == '__main__':
         model.load_state_dict(ckpt["state_dict"], strict=True)
         print("checkpoint state loaded!")
     litmodel = LitTrainModel(model, train_cfg)
-
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=litmodel.model_dir,
                                                        every_n_epochs=train_cfg.TRAIN.SAVE_EPOCH)
@@ -158,5 +223,5 @@ if __name__ == '__main__':
         callbacks=[checkpoint_callback],
 
     )
-
-    trainer.fit(model=litmodel, datamodule=datamodule)
+    # trainer.fit(model=litmodel, datamodule=datamodule)
+    trainer.fit(model=litmodel, train_dataloaders=train_dl, val_dataloaders=val_dl)

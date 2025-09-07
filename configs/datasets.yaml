@@ -1,4 +1,4 @@
-interhuman:
+interhuman_train:
     NAME: interhuman
     DATA_ROOT: ./data/motions_processed
     MOTION_REP: global
