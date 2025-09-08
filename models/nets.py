@@ -32,7 +32,7 @@ class MotionEncoder(nn.Module):
         self.query_token = nn.Parameter(torch.randn(1, self.latent_dim))
 
         self.embed_motion = nn.Linear(self.input_feats*2, self.latent_dim)
-        self.sequence_pos_encoder = PositionalEncoding(self.latent_dim, self.dropout, max_len=2000)
+        self.sequence_pos_encoder = PositionalEncoding(self.latent_dim, self.dropout, max_len=3000)
 
         seqTransEncoderLayer = nn.TransformerEncoderLayer(d_model=self.latent_dim,
                                                           nhead=self.num_heads,
@@ -100,31 +100,34 @@ class InterDenoiser(nn.Module):
         self.embed_timestep = TimestepEmbedder(self.latent_dim, self.sequence_pos_encoder)
 
         # Input Embedding
-        self.motion_embed = nn.Linear(self.input_feats, self.latent_dim)
+        self.motiona_embed = nn.Linear(self.input_feats, self.latent_dim)
+        self.motionb_embed = nn.Linear(self.input_feats, self.latent_dim)
         self.text_embed = nn.Linear(self.text_emb_dim, self.latent_dim)
 
-        self.blocks = nn.ModuleList()
+        self.blocksa = nn.ModuleList()
         for i in range(num_layers):
-            self.blocks.append(TransformerBlock(num_heads=num_heads,latent_dim=latent_dim, dropout=dropout, ff_size=ff_size))
+            self.blocksa.append(TransformerBlock(num_heads=num_heads,latent_dim=latent_dim, dropout=dropout, ff_size=ff_size))
+        self.blocksb = nn.ModuleList()
+        for i in range(num_layers):
+            self.blocksb.append(TransformerBlock(num_heads=num_heads,latent_dim=latent_dim, dropout=dropout, ff_size=ff_size))
         # Output Module
         self.out = zero_module(FinalLayer(self.latent_dim, self.input_feats))
 
 
-
-    def forward(self, x, timesteps, mask=None, cond=None):
+    def forward(self, x, timesteps, mask=None, cond=None, lmotion=None):
         """
         x: B, T, D
         """
         B, T = x.shape[0], x.shape[1]
-        x_a, x_b = x[...,:self.input_feats], x[...,self.input_feats:]
+        x_a, x_b = x, lmotion
 
         if mask is not None:
             mask = mask[...,0]
 
-        emb = self.embed_timestep(timesteps) + self.text_embed(cond)
+        emb = self.embed_timestep(timesteps).unsqueeze(1) + self.text_embed(cond)
 
-        a_emb = self.motion_embed(x_a)
-        b_emb = self.motion_embed(x_b)
+        a_emb = self.motiona_embed(x_a)
+        b_emb = self.motionb_embed(x_b)
         h_a_prev = self.sequence_pos_encoder(a_emb)
         h_b_prev = self.sequence_pos_encoder(b_emb)
 
@@ -132,19 +135,15 @@ class InterDenoiser(nn.Module):
             mask = torch.ones(B, T).to(x_a.device)
         key_padding_mask = ~(mask > 0.5)
 
-        for i,block in enumerate(self.blocks):
-            h_a = block(h_a_prev, h_b_prev, emb, key_padding_mask)
-            h_b = block(h_b_prev, h_a_prev, emb, key_padding_mask)
+        for i, (blocka, blockb) in enumerate(zip(self.blocksa, self.blocksb)):
+            h_a = blocka(h_a_prev, h_b_prev, emb, key_padding_mask)
+            h_b = blockb(h_b_prev, h_a_prev, emb, key_padding_mask)
             h_a_prev = h_a
             h_b_prev = h_b
 
         output_a = self.out(h_a)
-        output_b = self.out(h_b)
 
-        output = torch.cat([output_a, output_b], dim=-1)
-
-        return output
-
+        return output_a
 
 
 class InterDiffusion(nn.Module):
@@ -207,15 +206,17 @@ class InterDiffusion(nn.Module):
 
     def compute_loss(self, batch):
         cond = batch["cond"]
-        x_start = batch["motions"]
-        B,T = batch["motions"].shape[:2]
+        x_start = batch["fmotion"]
+        lmotion = batch["lmotion"]
+        B,T = lmotion.shape[:2]
 
 
         if cond is not None:
             cond, cond_mask = self.mask_cond(cond, 0.1)
+            lmotion, lmotion_mask = self.mask_cond(lmotion, 0.1)
 
 
-        seq_mask = self.generate_src_mask(batch["motions"].shape[1], batch["motion_lens"]).to(x_start.device)
+        seq_mask = self.generate_src_mask(lmotion.shape[1], batch["motion_lens"]).to(x_start.device)
 
         t, _ = self.sampler.sample(B, x_start.device)
         output = self.diffusion.training_losses(
@@ -227,13 +228,14 @@ class InterDiffusion(nn.Module):
             cond_mask=cond_mask,
             model_kwargs={"mask":seq_mask,
                           "cond":cond,
+                          "lmotion":lmotion,
                           },
         )
         return output
 
     def forward(self, batch):
         cond = batch["cond"]
-        # x_start = batch["motions"]
+        lmotion = batch["lmotion"]
         B = cond.shape[0]
         T = batch["motion_lens"][0]
 
@@ -251,12 +253,13 @@ class InterDiffusion(nn.Module):
         self.cfg_model = ClassifierFreeSampleModel(self.net, self.cfg_weight)
         output = self.diffusion_test.ddim_sample_loop(
             self.cfg_model,
-            (B, T, self.nfeats*2),
+            (B, T, self.nfeats),
             clip_denoised=False,
             progress=True,
             model_kwargs={
                 "mask":None,
                 "cond":cond,
+                "lmotion":lmotion,
             },
             x_start=None)
         return {"output":output}

@@ -8,7 +8,7 @@ from mmcv.runner import get_dist_info
 from mmcv.utils import Registry, build_from_cfg
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset
-
+from datasets.dd100lf_all2 import DD100lfAll2
 import torch
 from torch.utils.data import DistributedSampler as _DistributedSampler
 
@@ -130,3 +130,33 @@ def worker_init_fn(worker_id: int, num_workers: int, rank: int, seed: int):
     worker_seed = num_workers * rank + worker_id + seed
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+def DD100lf_data_loader(data_cfg, num_workers, shuffle=False, full_length=False):
+    dataset = DD100lfAll2(
+        data_cfg.music_root, 
+        data_cfg.data_root, 
+        split=data_cfg.split, 
+        full_length=full_length
+    )
+    
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=data_cfg.batch_size if not full_length else 1,
+        num_workers=num_workers,
+        pin_memory=True,
+        shuffle=shuffle,
+        drop_last=True,
+        # sampler=sampler,
+        # collate_fn=custom_collate_fn,
+    )
+    
+def DD100lf_dl(data_cfg, num_workers=16, full_length=False):
+    train_dl = DD100lf_data_loader(data_cfg.train, num_workers, shuffle=True, full_length=full_length)    
+    
+    # segmented val data
+    val_dl = DD100lf_data_loader(data_cfg.val, num_workers, shuffle=False)
+    # whole test data
+    whole_test_dl = DD100lf_data_loader(data_cfg.test, num_workers, shuffle=False, full_length=True)
+    
+    return train_dl, val_dl, whole_test_dl

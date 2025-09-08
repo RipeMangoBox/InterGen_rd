@@ -1195,8 +1195,8 @@ class GaussianDiffusion:
             #     terms["loss"] = terms["mse"] + terms["vb"]
             # else:
             #     terms["loss"] = terms["mse"]
-            terms["target"] = target
-            terms["pred"] = model_output
+            terms["target"] = torch.cat([target, model_kwargs["lmotion"]], dim=-1)
+            terms["pred"] = torch.cat([model_output, model_kwargs["lmotion"]], dim=-1)
         else:
             raise NotImplementedError(self.loss_type)
 
@@ -1382,11 +1382,11 @@ class MotionDiffusion(GaussianDiffusion):
         target = kwargs["x_start"]
         B, T = target.shape[:-1]
 
-        target = target.reshape(B, T, 2, -1)
-        mask = mask.reshape(B, T, -1, 1)
-
         target = self.normalizer.forward(target)
-
+        kwargs['model_kwargs']["lmotion"] = self.normalizer.forward(kwargs['model_kwargs']["lmotion"])
+        target = target.reshape(B, T, -1)
+        mask = mask.reshape(B, T, -1, 1)
+        
         kwargs["x_start"] = target.reshape(B, T, -1)
         items = super().training_losses(self._wrap_model(model), *args, **kwargs)
         prediction = items["pred"].reshape(B, T, 2, -1)
@@ -1400,14 +1400,13 @@ class MotionDiffusion(GaussianDiffusion):
         loss_a_manager = GeometricLoss("l2", 22, "A")
         loss_a_manager.forward(prediction[...,0,:], target[...,0,:], mask[...,0,:], timestep_mask)
 
-        loss_b_manager = GeometricLoss("l2", 22, "B")
-        loss_b_manager.forward(prediction[...,1,:], target[...,1,:], mask[...,0,:], timestep_mask)
+        # loss_b_manager = GeometricLoss("l2", 22, "B")
+        # loss_b_manager.forward(prediction[...,1,:], target[...,1,:], mask[...,0,:], timestep_mask)
 
         losses = {}
         losses.update(loss_a_manager.losses)
-        losses.update(loss_b_manager.losses)
         losses.update(interloss_manager.losses)
-        losses["total"] = loss_a_manager.losses["A"] + loss_b_manager.losses["B"] + interloss_manager.losses["total"]
+        losses["total"] = loss_a_manager.losses["A"] + interloss_manager.losses["total"]
 
         return losses
 

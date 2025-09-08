@@ -8,6 +8,8 @@ batch_size: 16
 num_dataloader_workers: 4
 TRAIN:
   LR: 1e-4
+  PRECISION: 16
+  ACCUMULATE_GRAD_BATCHES: 1
   WEIGHT_DECAY: 0.00002
   # BATCH_SIZE: 16
   EPOCH: 2000

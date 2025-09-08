@@ -18,3 +18,29 @@ interhuman_test:
     MOTION_REP: global
     MODE: test
     CACHE: True
+
+dd100lf:
+    START_EVAL_EPOCH: 500
+    EVAL_N_EPOCHS: 500
+    START_SYNTHESIS_EPOCH: 300
+    SYNTHESIS_N_EPOCHS: 500
+    train:
+        music_root: ../ReactDance/data_lazy/music   # music_root: ./data/music
+        data_root: ../ReactDance/data_lazy/motion   # data_root: ./data/motion
+        motion_data_txt: null   # ./data_lazy/motion/debug_train_files.txt    # debug_train_files.txt    train_files.txt
+        split: train
+        batch_size: 64
+    val:
+        music_root: ../ReactDance/data_lazy/music   # music_root: ./data/music
+        data_root: ../ReactDance/data_lazy/motion   # data_root: ./data/motion
+        motion_data_txt: null   # ./data_lazy/motion/debug_test_files.txt    # debug_test_files.txt     test_files.txt
+        music_source: ../ReactDance/data_lazy/music/mp3/all/     # music_source: ./data/music/mp3/test/
+        split: test
+        batch_size: 64
+    test:
+        music_root: ../ReactDance/data_lazy/music   # music_root: ./data/music
+        data_root: ../ReactDance/data_lazy/motion   # data_root: ./data/motion
+        motion_data_txt: null   # ./data_lazy/motion/debug_test_files.txt    # debug_test_files.txt     test_files.txt
+        music_source: ../ReactDance/data_lazy/music/mp3/all/     # music_source: ./data/music/mp3/test/
+        split: test
+        batch_size: 1

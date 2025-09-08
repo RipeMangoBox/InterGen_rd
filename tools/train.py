@@ -10,7 +10,9 @@ from os.path import join as pjoin
 from torch.utils.tensorboard import SummaryWriter
 from models import *
 from tools.infer import generate_samples_loop
-from datasets import InterHumanDataset
+from datasets.dataloader import DD100lf_dl
+from models import InterGen
+from LightingModel import LitInterGen
 os.environ['PL_TORCH_DISTRIBUTED_BACKEND'] = 'nccl'
 from lightning.pytorch.strategies import DDPStrategy
 torch.set_float32_matmul_precision('medium')
@@ -19,7 +21,25 @@ import os
 from argparse import ArgumentParser, Namespace
 import yaml
 from lightning import Trainer
+import shutil
 
+class CopyConfigCallback(pl.Callback):
+    def __init__(self, config_paths):
+        super().__init__()
+        self.config_paths = config_paths if isinstance(config_paths, list) else [config_paths]
+
+    def on_train_start(self, trainer, pl_module):
+        # 获取当前的日志目录（事件目录）
+        log_dir = trainer.log_dir
+
+        # 检查config文件是否存在
+        for config_path in self.config_paths:
+            if os.path.exists(config_path):
+                shutil.copy(config_path, log_dir)
+                print(f"Config file copied to {log_dir}")
+            else:
+                print(f"Config file {self.config_path} not found!")
+                
 def get_hparams():
     parser = ArgumentParser()
     parser.add_argument("--dataset_root", default='./data/motions_processed')
@@ -169,59 +189,100 @@ def build_models(cfg):
         model = InterGen(cfg)
     return model
 
-def data_loader(dataset_root, data_cfg, batch_size, num_workers=16, shuffle=True):
+def load_checkpoint(ckpt):
+    litmodel = LitInterGen.load_from_checkpoint(checkpoint_path=ckpt, model=model, cfg=cfg, val_dl=val_dl, test_dl=test_dl)
+    print("checkpoint state loaded!")
+    return litmodel.cuda()
 
-    print("dataset_root: " + dataset_root)
-    dataset = InterHumanDataset(data_cfg)
-
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        pin_memory=True,
-        shuffle=shuffle,
-        drop_last=True,
+def train_mode(litmodel):
+    if train_cfg.TRAIN.RESUME is not None:
+        ckpt = train_cfg.TRAIN.RESUME
+        print(f"resuming from checkpoint: {ckpt}")
+        litmodel = load_checkpoint(ckpt)
+    else:
+        litmodel = LitInterGen(model=model, cfg=cfg, val_dl=val_dl, test_dl=test_dl)
+        ckpt = None
+        
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        save_top_k=4, 
+        monitor='TRAIN_LOSS', 
+        mode='min', 
+        filename='model-{epoch:02d}-{step:05d}-{TRAIN_LOSS:.4f}-{VAL_LOSS:.4f}', 
+        save_last=False, 
+        verbose=True
     )
     
-def dataloaders(dataset_root, data_cfg, batch_size, num_workers):
-
-    train_dl = data_loader(dataset_root, data_cfg.interhuman_train, batch_size, num_workers, shuffle=True)    
-    val_dl = data_loader(dataset_root, data_cfg.interhuman_val, batch_size, num_workers, shuffle=False)
+    fid_checkpoint = pl.callbacks.ModelCheckpoint(
+        save_top_k=4,  # 保存全局最优的4个
+        monitor='Eval_FID',  # 确保训练时该指标被正确记录
+        mode='min',  # FID越低越好
+        filename='fid_best_{epoch:02d}-{Eval_FID:.2f}',
+        verbose=True,
+    )
     
-    return train_dl, val_dl
+    copy_config_callback = CopyConfigCallback([model_config_path, train_config_path, dataset_config_path])
+    max_epochs = getattr(cfg.TRAIN, 'EPOCH', 2000)
+    
+    trainer = pl.Trainer(
+        # accumulate_grad_batches=2, # manually set in training_step()
+        devices=[1],
+        accelerator='gpu',
+        max_epochs=max_epochs,
+        callbacks=[checkpoint_callback, fid_checkpoint, copy_config_callback],
+        # **cfg.Trainer,
+        # num_sanity_val_steps=0,
+    )
+    trainer.fit(model=litmodel, train_dataloaders=train_dl, val_dataloaders=val_dl, ckpt_path=ckpt)
 
-
+def synthesis_and_vis_mode(litmodel):
+    litmodel.synthesis(config_path)
+    
+def vis_gt_mode(litmodel, no_video=False, vis_mode='intergen', seqlen=300):
+    litmodel.vis_gt(no_video=no_video, vis_mode=vis_mode, seqlen=seqlen)
+    
+def calc_motion_normalizer_mode(litmodel):
+    train_dl, val_dl, test_dl = DD100lf_dl(dataset_cfg, full_length=True)
+    litmodel = LitInterGen(model, cfg, val_dl, train_dl)
+    litmodel.calc_motion_normalizer()
+    
 if __name__ == '__main__':
+    seed = 42
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    config_path = 'configs'
+    model_config_path = f"{config_path}/model.yaml"
+    train_config_path = f"{config_path}/train.yaml"
+    dataset_config_path = f"{config_path}/datasets.yaml"
+    
     print(os.getcwd())
-    model_cfg = get_config("configs/model.yaml")
-    train_cfg = get_config("configs/train.yaml")
-    data_cfg = get_config("configs/datasets.yaml")
-
+    model_cfg = get_config(model_config_path)
+    train_cfg = get_config(train_config_path)
+    data_cfg = get_config(dataset_config_path)
+    datatset_train = data_cfg.get('dataset_train', 'dd100lf')
+    dataset_cfg = data_cfg[datatset_train]
+    
+    cfg = model_cfg
+    cfg.update(train_cfg)
+    cfg.update(dataset_cfg)
 
     # datamodule = DataModule(data_cfg, train_cfg.TRAIN.BATCH_SIZE, train_cfg.TRAIN.NUM_WORKERS)
-    hparams, conf_name = get_hparams()
-    train_dl, val_dl = dataloaders(hparams.dataset_root, data_cfg, hparams.batch_size, hparams.num_dataloader_workers)
-    model = build_models(model_cfg)
+    train_dl, val_dl, test_dl = DD100lf_dl(dataset_cfg)
+    model = build_models(cfg)
 
-    if train_cfg.TRAIN.RESUME:
-        ckpt = torch.load(train_cfg.TRAIN.RESUME, map_location="cpu")
-        for k in list(ckpt["state_dict"].keys()):
-            if "model" in k:
-                ckpt["state_dict"][k.replace("model.", "")] = ckpt["state_dict"].pop(k)
-        model.load_state_dict(ckpt["state_dict"], strict=True)
-        print("checkpoint state loaded!")
-    litmodel = LitTrainModel(model, train_cfg)
-
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(dirpath=litmodel.model_dir,
-                                                       every_n_epochs=train_cfg.TRAIN.SAVE_EPOCH)
-    trainer = pl.Trainer(
-        default_root_dir=litmodel.model_dir,
-        devices=[0], accelerator='gpu',
-        max_epochs=train_cfg.TRAIN.EPOCH,
-        strategy=DDPStrategy(find_unused_parameters=True),
-        precision=32,
-        callbacks=[checkpoint_callback],
-
-    )
-    # trainer.fit(model=litmodel, datamodule=datamodule)
-    trainer.fit(model=litmodel, train_dataloaders=train_dl, val_dataloaders=val_dl)
+    litmodel = LitInterGen(model, cfg, val_dl, train_dl)
+    
+    mode = 'train'
+    if mode == 'train':
+        train_mode(litmodel)
+    elif mode == 'synthesis':
+        ckpt = model_cfg.CHECKPOINT
+        litmodel = load_checkpoint(ckpt)
+        synthesis_and_vis_mode(litmodel)
+    elif mode == 'vis_gt':
+        vis_gt_mode(litmodel, no_video=False, vis_mode='intergen', seqlen=240)
+    elif mode == 'calc_motion_normalizer':
+        calc_motion_normalizer_mode(litmodel)

@@ -86,6 +86,32 @@ def rigid_transform(relative, data):
 
     return data
 
+def rigid_transform_dd100lf(relative, data):
+    # 现在z轴为身高方向，旋转轴应为z轴
+    global_positions = data[..., :22 * 3].reshape(data.shape[:-1] + (22, 3))
+    global_vel = data[..., 22 * 3:22 * 6].reshape(data.shape[:-1] + (22, 3))
+
+    relative_rot = relative[0]
+    relative_t = relative[1:3]
+    # 构造绕z轴的四元数
+    relative_r_rot_quat = np.zeros(global_positions.shape[:-1] + (4,))
+    # 配套一，getitem中angle = np.arctan2(r_relative[:, 3:4], r_relative[:, 0:1])
+    # relative_r_rot_quat[..., 0] = np.cos(relative_rot)
+    # relative_r_rot_quat[..., 2] = np.sin(relative_rot)
+    
+    # 配套二：getitem中angle = 2 * np.arctan2(r_relative[:, 3:4], r_relative[:, 0:1])
+    relative_r_rot_quat[..., 0] = np.cos(relative_rot)
+    relative_r_rot_quat[..., 3] = np.sin(relative_rot)  # z分量
+
+    # 旋转
+    global_positions = qrot_np(qinv_np(relative_r_rot_quat), global_positions)
+    # 平移
+    global_positions[..., [0, 1]] += relative_t  # x, y平移
+    data[..., :22 * 3] = global_positions.reshape(data.shape[:-1] + (-1,))
+    global_vel = qrot_np(qinv_np(relative_r_rot_quat), global_vel)
+    data[..., 22 * 3:22 * 6] = global_vel.reshape(data.shape[:-1] + (-1,))
+
+    return data
 
 class MotionNormalizer():
     def __init__(self):
@@ -106,27 +132,85 @@ class MotionNormalizer():
 
 
 
+# class MotionNormalizerTorch():
+#     def __init__(self):
+#         mean = np.load("./data/global_mean.npy")
+#         std = np.load("./data/global_std.npy")
+
+#         self.motion_mean = torch.from_numpy(mean).float()
+#         self.motion_std = torch.from_numpy(std).float()
+
+
+#     def forward(self, x):
+#         device = x.device
+#         x = x.clone()
+#         x = (x - self.motion_mean.to(device)) / self.motion_std.to(device)
+#         return x
+
+#     def backward(self, x, global_rt=False):
+#         device = x.device
+#         x = x.clone()
+#         x = x * self.motion_std.to(device) + self.motion_mean.to(device)
+#         return x
+
 class MotionNormalizerTorch():
-    def __init__(self):
-        mean = np.load("./data/global_mean.npy")
-        std = np.load("./data/global_std.npy")
 
-        self.motion_mean = torch.from_numpy(mean).float()
-        self.motion_std = torch.from_numpy(std).float()
-
+    """
+    Torch version of MotionNormalizerRD.
+    """
+    def __init__(self, mode='both'):
+        try:
+            if mode == 'both':
+                mean = np.load(f"./data/normalizer/rd/global_mean_rd.npy")
+                std = np.load(f"./data/normalizer/rd/global_std_rd.npy")
+            elif mode == 'leader':
+                mean = np.load(f"./data/normalizer/rd/global_mean_rdl.npy")
+                std = np.load(f"./data/normalizer/rd/global_std_rdl.npy")
+            elif mode == 'follower':
+                mean = np.load(f"./data/normalizer/rd/global_mean_rdf.npy")
+                std = np.load(f"./data/normalizer/rd/global_std_rdf.npy")
+              
+            self.motion_mean = torch.from_numpy(mean).float()
+            self.motion_std = torch.from_numpy(std).float()
+            
+            eps = 1e-8
+            # 防止除以0，实际针对left_foot和right_foot joint的rot，即motion representation 的 (tensor([186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197]),)
+            zero_mask = abs(self.motion_std) < eps
+            self.motion_std = torch.where(zero_mask, 1, self.motion_std)
+            self.motion_mean = torch.where(zero_mask, 0, self.motion_mean)
+        except:
+            print(f"Unknown mode: {mode} or File not found or not loaded")
 
     def forward(self, x):
         device = x.device
-        x = x.clone()
-        x = (x - self.motion_mean.to(device)) / self.motion_std.to(device)
-        return x
+        return (x - self.motion_mean.to(device)) / self.motion_std.to(device)
 
-    def backward(self, x, global_rt=False):
+    def backward(self, x):
         device = x.device
-        x = x.clone()
-        x = x * self.motion_std.to(device) + self.motion_mean.to(device)
-        return x
+        return x * self.motion_std.to(device) + self.motion_mean.to(device)
 
+
+class MusicNormalizerRDTorch():
+    """
+    Torch version of MusicNormalizerRD.
+    """
+    def __init__(self):
+        try:
+            mean = np.load("./data/normalizer/rd/global_mean_rd_music.npy")
+            std = np.load("./data/normalizer/rd/global_std_rd_music.npy")
+            self.music_mean = torch.from_numpy(mean).float()
+            self.music_std = torch.from_numpy(std).float()
+        except:
+            print("File not found or not loaded")
+
+    def forward(self, x):
+        device = x.device
+        return (x - self.music_mean.to(device)) / self.music_std.to(device)
+
+    def backward(self, x):
+        device = x.device
+        return x * self.music_std.to(device) + self.music_mean.to(device)
+    
 trans_matrix = torch.Tensor([[1.0, 0.0, 0.0],
                          [0.0, 0.0, 1.0],
                          [0.0, -1.0, 0.0]])
@@ -212,6 +296,78 @@ def process_motion_np(motion, feet_thre, prev_frames, n_joints):
 
 
 
+def process_dd100lf_motion_np(motion, feet_thre, prev_frames, n_joints):
+    # (seq_len, joints_num, 3), motion=(seq_len, joints_num*3+rot_num)
+    #     '''Down Sample'''
+    #     positions = positions[::ds_num]
+    up_axis = 2 # z up (now z is height)
+    '''Uniform Skeleton'''
+    # positions = uniform_skeleton(positions, tgt_offsets)
+
+    positions = motion[:, :n_joints*3].reshape(-1, n_joints, 3)
+    rotations = motion[:, n_joints*3:]
+
+    # 不再变换坐标轴，假设输入已经是xy平面，z为高度
+    # positions = np.einsum("mn, tjn->tjm", trans_matrix, positions)  # 不再需要
+
+    '''Put on Floor'''
+    floor_height = positions.min(axis=0).min(axis=0)[2]  # z为高度
+    positions[:, :, 2] -= floor_height
+
+    '''XY at origin'''
+    root_pos_init = positions[prev_frames]
+    root_pose_init_xy = root_pos_init[0] * np.array([1, 1, 0])  # 只保留xy，z为0
+    positions = positions - root_pose_init_xy
+
+    '''All initially face Y+ (正y轴)'''
+    r_hip, l_hip, sdr_r, sdr_l = face_joint_indx
+    across = root_pos_init[r_hip] - root_pos_init[l_hip]
+    across = across / np.sqrt((across ** 2).sum(axis=-1))[..., np.newaxis]
+
+    # forward (3,), rotate around z-axis
+    forward_init = np.cross(across, np.array([[0, 0, 1]]), axis=-1)  # z轴朝上，右手定则
+    forward_init = forward_init / np.sqrt((forward_init ** 2).sum(axis=-1))[..., np.newaxis]
+
+    target = np.array([[0, 1, 0]])  # y轴正方向
+    root_quat_init = qbetween_np(forward_init, target)
+    root_quat_init_for_all = np.ones(positions.shape[:-1] + (4,)) * root_quat_init
+
+    positions = qrot_np(root_quat_init_for_all, positions)
+
+    """ Get Foot Contacts """
+
+    def foot_detect(positions, thres):
+        velfactor, heightfactor = np.array([thres, thres]), np.array([0.12, 0.05])
+
+        feet_l_x = (positions[1:, fid_l, 0] - positions[:-1, fid_l, 0]) ** 2
+        feet_l_y = (positions[1:, fid_l, 1] - positions[:-1, fid_l, 1]) ** 2
+        feet_l_z = (positions[1:, fid_l, 2] - positions[:-1, fid_l, 2]) ** 2
+        feet_l_h = positions[:-1, fid_l, 2]  # z为高度
+        feet_l = (((feet_l_x + feet_l_y + feet_l_z) < velfactor) & (feet_l_h < heightfactor)).astype(np.float32)
+
+        feet_r_x = (positions[1:, fid_r, 0] - positions[:-1, fid_r, 0]) ** 2
+        feet_r_y = (positions[1:, fid_r, 1] - positions[:-1, fid_r, 1]) ** 2
+        feet_r_z = (positions[1:, fid_r, 2] - positions[:-1, fid_r, 2]) ** 2
+        feet_r_h = positions[:-1, fid_r, 2]  # z为高度
+        feet_r = (((feet_r_x + feet_r_y + feet_r_z) < velfactor) & (feet_r_h < heightfactor)).astype(np.float32)
+        return feet_l, feet_r
+    #
+    feet_l, feet_r = foot_detect(positions, feet_thre)
+
+    '''Get Joint Rotation Representation'''
+    rot_data = rotations
+
+    '''Get Joint Rotation Invariant Position Represention'''
+    joint_positions = positions.reshape(len(positions), -1)
+    joint_vels = positions[1:] - positions[:-1]
+    joint_vels = joint_vels.reshape(len(joint_vels), -1)
+
+    data = joint_positions[:-1] # [frame, 66=(joints)22*3] 0+66=66
+    data = np.concatenate([data, joint_vels], axis=-1) # [frame, 66=(joints)22*6], 66+66=132
+    data = np.concatenate([data, rot_data[:-1]], axis=-1) # [frame, 126=21*6], 132+126=258
+    data = np.concatenate([data, feet_l, feet_r], axis=-1) # both feet are [frame, 2], 258+2+2=262
+
+    return data, root_quat_init, root_pose_init_xy[None]
 
 
 def mkdir(path):
@@ -336,3 +492,9 @@ def motion_temporal_filter(motion, sigma=1):
         motion[:, i] = gaussian_filter(motion[:, i], sigma=sigma, mode="nearest")
     return motion.reshape(motion.shape[0], -1, 3)
 
+def save_pos3d(posf, posl, evaldir, fname, suffix='pos3d_npy'):
+    save_folder = os.path.join(evaldir, suffix)
+    os.makedirs(save_folder, exist_ok=True)
+    
+    np.save(os.path.join(save_folder, fname + '_00'), posf)
+    np.save(os.path.join(save_folder, fname + '_01'), posl)

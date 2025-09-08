@@ -49,8 +49,8 @@ class InterLoss(nn.Module):
     def forward(self, motion_pred, motion_gt, mask, timestep_mask):
         B, T = motion_pred.shape[:2]
         self.losses["simple"] = self.seq_masked_mse(motion_pred, motion_gt, mask)
-        target = self.normalizer.backward(motion_gt, global_rt=True)
-        prediction = self.normalizer.backward(motion_pred, global_rt=True)
+        target = self.normalizer.backward(motion_gt)
+        prediction = self.normalizer.backward(motion_pred)
 
         self.pred_g_joints = prediction[..., :self.nb_joints * 3].reshape(B, T, -1, self.nb_joints, 3)
         self.tgt_g_joints = target[..., :self.nb_joints * 3].reshape(B, T, -1, self.nb_joints, 3)
@@ -60,7 +60,7 @@ class InterLoss(nn.Module):
 
         self.forward_distance_map(thresh=1)
         self.forward_joint_affinity(thresh=0.1)
-        self.forward_relatvie_rot()
+        # self.forward_relatvie_rot()
         self.accum_loss()
 
 
@@ -82,6 +82,10 @@ class InterLoss(nn.Module):
         pred_relative_rot = qbetween(forward[..., 0, :], forward[..., 1, :])
         tgt_relative_rot = qbetween(forward_gt[..., 0, :], forward_gt[..., 1, :])
 
+        # ignore nan values
+        pred_relative_rot[torch.isnan(pred_relative_rot)] = 0
+        tgt_relative_rot[torch.isnan(tgt_relative_rot)] = 0
+        
         self.losses["RO"] = self.mix_masked_mse(pred_relative_rot[..., [0, 2]],
                                                             tgt_relative_rot[..., [0, 2]],
                                                             self.mask[..., 0, :], self.timestep_mask) * self.weights["RO"]
@@ -180,8 +184,8 @@ class GeometricLoss(nn.Module):
     def forward(self, motion_pred, motion_gt, mask, timestep_mask):
         B, T = motion_pred.shape[:2]
         # self.losses["simple"] = self.seq_masked_mse(motion_pred, motion_gt, mask)  # * 0.01
-        target = self.normalizer.backward(motion_gt, global_rt=True)
-        prediction = self.normalizer.backward(motion_pred, global_rt=True)
+        target = self.normalizer.backward(motion_gt)
+        prediction = self.normalizer.backward(motion_pred)
 
         self.first_motion_pred =motion_pred[:,0:1]
         self.first_motion_gt =motion_gt[:,0:1]
@@ -200,8 +204,8 @@ class GeometricLoss(nn.Module):
     def get_local_positions(self, positions, r_rot):
         '''Local pose'''
         positions[..., 0] -= positions[..., 0:1, 0]
-        positions[..., 2] -= positions[..., 0:1, 2]
-        '''All pose face Z+'''
+        positions[..., 1] -= positions[..., 0:1, 1]
+        '''All pose face Y+'''
         positions = qrot(r_rot[..., None, :].repeat(1, 1, positions.shape[-2], 1), positions)
         return positions
 
@@ -216,23 +220,41 @@ class GeometricLoss(nn.Module):
         across_gt = tgt_g_joints[..., r_hip, :] - tgt_g_joints[..., l_hip, :]
         across_gt = across_gt / across_gt.norm(dim=-1, keepdim=True)
 
-        y_axis = torch.zeros_like(across)
-        y_axis[..., 1] = 1
+            # '''All pose face Z+'''
+            # y_axis = torch.zeros_like(across)
+            # y_axis[..., 1] = 1
 
-        forward = torch.cross(y_axis, across, axis=-1)
+            # forward = torch.cross(y_axis, across, axis=-1)
+            # forward = forward / forward.norm(dim=-1, keepdim=True)
+            # forward_gt = torch.cross(y_axis, across_gt, axis=-1)
+            # forward_gt = forward_gt / forward_gt.norm(dim=-1, keepdim=True)
+
+            # z_axis = torch.zeros_like(forward)
+            # z_axis[..., 2] = 1
+            # noise = torch.randn_like(z_axis) *0.0001
+            # z_axis = z_axis+noise
+            # z_axis = z_axis / z_axis.norm(dim=-1, keepdim=True)
+
+            # pred_rot = qbetween(forward, z_axis)
+            # tgt_rot = qbetween(forward_gt, z_axis)
+            
+        '''All pose face Y+'''
+        z_axis = torch.zeros_like(across)
+        z_axis[..., 2] = 1
+
+        forward = torch.cross(z_axis, across, axis=-1)
         forward = forward / forward.norm(dim=-1, keepdim=True)
-        forward_gt = torch.cross(y_axis, across_gt, axis=-1)
+        forward_gt = torch.cross(z_axis, across_gt, axis=-1)
         forward_gt = forward_gt / forward_gt.norm(dim=-1, keepdim=True)
 
-        z_axis = torch.zeros_like(forward)
-        z_axis[..., 2] = 1
-        noise = torch.randn_like(z_axis) *0.0001
-        z_axis = z_axis+noise
-        z_axis = z_axis / z_axis.norm(dim=-1, keepdim=True)
+        y_axis = torch.zeros_like(forward)
+        y_axis[..., 1] = 1
+        noise = torch.randn_like(y_axis) *0.0001
+        y_axis = y_axis+noise
+        y_axis = y_axis / y_axis.norm(dim=-1, keepdim=True)
 
-
-        pred_rot = qbetween(forward, z_axis)
-        tgt_rot = qbetween(forward_gt, z_axis)
+        pred_rot = qbetween(forward, y_axis)
+        tgt_rot = qbetween(forward_gt, y_axis)
 
         B, T, J, D = self.pred_g_joints.shape
         pred_joints = self.get_local_positions(pred_g_joints, pred_rot).reshape(B, T, -1)
@@ -255,7 +277,7 @@ class GeometricLoss(nn.Module):
     def forward_contact(self):
 
         feet_vel = self.pred_g_joints[:, 1:, self.fids, :] - self.pred_g_joints[:, :-1, self.fids,:]
-        feet_h = self.pred_g_joints[:, :-1, self.fids, 1]
+        feet_h = self.pred_g_joints[:, :-1, self.fids, 2]   # 2 is z axis
         # contact = target[:,:-1,:,-8:-4] # [b,t,p,4]
 
         contact = self.foot_detect(feet_vel, feet_h, 0.001)
@@ -263,7 +285,6 @@ class GeometricLoss(nn.Module):
         self.losses["FC_"+self.name] = self.mix_masked_mse(feet_vel, torch.zeros_like(feet_vel), self.mask[:, :-1],
                                                           self.timestep_mask,
                                                           contact) * self.weights["FC"]
-
 
 
     def forward_bone_length(self):
@@ -290,8 +311,8 @@ class GeometricLoss(nn.Module):
     def forward_traj(self):
         B, T = self.pred_g_joints.shape[:2]
 
-        pred_traj = self.pred_g_joints[..., 0, [0, 2]]
-        tgt_g_traj = self.tgt_g_joints[..., 0, [0, 2]]
+        pred_traj = self.pred_g_joints[..., 0, [0, 1]]  # 0 is x axis, 1 is y axis
+        tgt_g_traj = self.tgt_g_joints[..., 0, [0, 1]]
 
         self.losses["TR_"+self.name] = self.mix_masked_mse(pred_traj, tgt_g_traj, self.mask, self.timestep_mask) * self.weights["TR"]
 

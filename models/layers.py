@@ -22,7 +22,10 @@ class AdaLN(nn.Module):
         emb_out = self.emb_layers(emb)
         # scale: B, 1, D / shift: B, 1, D
         scale, shift = torch.chunk(emb_out, 2, dim=-1)
-        h = self.norm(h) * (1 + scale[:, None]) + shift[:, None]
+        if len(emb_out.shape) == 2:
+            h = self.norm(h) * (1 + scale[:, None]) + shift[:, None]
+        else:
+            h = self.norm(h) * (1 + scale) + shift
         return h
 
 
